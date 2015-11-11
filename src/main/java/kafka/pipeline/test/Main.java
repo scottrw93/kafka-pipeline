@@ -115,14 +115,11 @@ public class Main {
 
 			producer.send(new ProducerRecord<byte[], byte[]>("websitevisits", key, value), new Callback() {
 				public void onCompletion(RecordMetadata arg0, Exception arg1) {
-					xxx("Ack");
+					//ack
 				}
 			});
 		}
 		producer.close();
 	}
 
-	protected static void xxx(String ack) {
-		System.out.println(ack);
-	}
 }
