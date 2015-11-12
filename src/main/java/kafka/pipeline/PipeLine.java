@@ -19,6 +19,11 @@ import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
+import org.apache.kafka.clients.producer.Callback;
+import org.apache.kafka.clients.producer.KafkaProducer;
+import org.apache.kafka.clients.producer.ProducerConfig;
+import org.apache.kafka.clients.producer.ProducerRecord;
+import org.apache.kafka.clients.producer.RecordMetadata;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.errors.AuthorizationException;
 import org.apache.kafka.common.errors.WakeupException;
@@ -31,7 +36,7 @@ public class PipeLine {
 	private Map<String, Queue<ConsumerRecord<byte[], byte[]>>> topicInputQueues;
 
 	private KafkaConsumer<byte[], byte[]> consumer;
-	private Properties props;
+	private KafkaProducer<byte[], byte[]> producer;
 	private Map<TopicPartition, OffsetAndMetadata> lastOffsets;
 
 	/**
@@ -40,6 +45,12 @@ public class PipeLine {
 	 */
 	private final int offsetBatchSize = 5;
 	private int offsetBatchCounter;
+
+	private final int outputBatchSize = 1;
+	private int outputBatchCounter;
+
+	private Properties producerProps;
+	private Properties consumerProperties;
 
 	/**
 	 * The pipeline can consume messages from Kafka and allows the use of hooks to
@@ -52,15 +63,26 @@ public class PipeLine {
 	 * run but to do this I need to implement check pointing for the datastores.
 	 * 
 	 * @param props - configuration for the Kafka Consumer
+	 * @param producerProps 
 	 */
-	public PipeLine(Properties props){
+	public PipeLine(Properties consumerProperties, Properties producerProps){
 		this.steps = new TreeMap<Integer, StepHook>();
 		this.stores = new HashMap<String, DataStore>();
 		this.outputQueue = new LinkedList<Message>();
 		this.topicInputQueues = new HashMap<String, Queue<ConsumerRecord<byte[], byte[]>>>();
 		this.lastOffsets = new HashMap<TopicPartition, OffsetAndMetadata>();
 		this.offsetBatchCounter = 0;
-		this.props = props;
+		this.outputBatchCounter = 0;
+
+		this.consumerProperties = consumerProperties;
+		this.producerProps = producerProps;
+
+		this.producerProps.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, 
+				"org.apache.kafka.common.serialization.ByteArraySerializer");
+		this.producerProps.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, 
+				"org.apache.kafka.common.serialization.ByteArraySerializer");
+
+		this.producer = new KafkaProducer<byte[], byte[]>(producerProps);
 	}
 
 	/**
@@ -68,16 +90,14 @@ public class PipeLine {
 	 * @param partitions - topics that messages are to be consumed from
 	 */
 	public void input(TopicPartition... partitions){
-		props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, 
+		consumerProperties.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, 
+				"org.apache.kafka.common.serialization.ByteArrayDeserializer");
+		consumerProperties.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, 
 				"org.apache.kafka.common.serialization.ByteArrayDeserializer");
 
-		props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, 
-				"org.apache.kafka.common.serialization.ByteArrayDeserializer");
-
-		consumer = new KafkaConsumer<byte[], byte[]>(props);	
+		consumer = new KafkaConsumer<byte[], byte[]>(consumerProperties);	
 
 		consumer.assign(Arrays.asList(partitions));
-		//consumer.seekToBeginning(partitions);
 
 		for(TopicPartition topic : partitions){
 			topicInputQueues.put(topic.topic(), new LinkedList<ConsumerRecord<byte[], byte[]>>());
@@ -112,7 +132,7 @@ public class PipeLine {
 			} catch(AuthorizationException e){
 
 			} catch(Exception e){
-				
+
 			}
 		}
 
@@ -135,9 +155,33 @@ public class PipeLine {
 	 * This method currently stores the messages in a list. The intention is to output
 	 * the messages to a topic later.
 	 * @param pair
+	 * @throws IOException 
 	 */
-	public void output(Message pair){
+	public void output(Message pair, String topic) throws IOException{
 		outputQueue.add(pair);
+		produce(topic);
+	}
+	
+	private void produce(String topic) throws IOException{
+		while(!outputQueue.isEmpty()){
+			Message msg = outputQueue.poll();
+			byte[] key = Key.seriailize(msg.key());
+			byte[] value = Value.seriailize(msg.value());
+			producer.send(new ProducerRecord<byte[], byte[]>(topic, key, value), new Callback() {
+				public void onCompletion(RecordMetadata arg0, Exception arg1) {
+					checkForAck();
+				}
+			});
+		}
+	}
+
+	protected void checkForAck() {
+		outputBatchCounter++;
+
+		if(outputQueue.isEmpty() && outputBatchCounter != outputBatchSize){
+			System.out.println("Handle an error");
+		}
+		outputBatchCounter = 0;
 	}
 
 	/**
@@ -159,8 +203,11 @@ public class PipeLine {
 				steps.get(i).execute(this);
 			}
 		}
+		produce("output");
 		consumer.commitSync(lastOffsets);
+		
 		consumer.close();
+		producer.close();
 	}
 
 	/** 
