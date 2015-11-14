@@ -32,7 +32,7 @@ public class PipeLine {
 
 	private TreeMap<Integer, StepHook> steps;
 	private HashMap<String, DataStore> stores;
-	private Queue<Message> outputQueue;
+	private Queue<ProducerRecord<byte[], byte[]>> outputQueue;
 	private Map<String, Queue<ConsumerRecord<byte[], byte[]>>> topicInputQueues;
 
 	private KafkaConsumer<byte[], byte[]> consumer;
@@ -46,7 +46,7 @@ public class PipeLine {
 	private final int offsetBatchSize = 5;
 	private int offsetBatchCounter;
 
-	private final int outputBatchSize = 1;
+	private int outputBatchSize = 4;
 	private int outputBatchCounter;
 
 	private Properties producerProps;
@@ -68,7 +68,7 @@ public class PipeLine {
 	public PipeLine(Properties consumerProperties, Properties producerProps){
 		this.steps = new TreeMap<Integer, StepHook>();
 		this.stores = new HashMap<String, DataStore>();
-		this.outputQueue = new LinkedList<Message>();
+		this.outputQueue = new LinkedList<ProducerRecord<byte[], byte[]>>();
 		this.topicInputQueues = new HashMap<String, Queue<ConsumerRecord<byte[], byte[]>>>();
 		this.lastOffsets = new HashMap<TopicPartition, OffsetAndMetadata>();
 		this.offsetBatchCounter = 0;
@@ -105,7 +105,7 @@ public class PipeLine {
 	}
 
 	/**
-	 * Consume a message from the given topic. This method is guranteed to return
+	 * Consume a message from the given topic. This method is guaranteed to return
 	 * a Message
 	 * @param topic - the topic you wish to poll from
 	 * @return - a message from the specified topic
@@ -135,7 +135,6 @@ public class PipeLine {
 
 			}
 		}
-
 		return new Message(key, value);
 	}
 
@@ -157,17 +156,21 @@ public class PipeLine {
 	 * @param pair
 	 * @throws IOException 
 	 */
-	public void output(Message pair, String topic) throws IOException{
-		outputQueue.add(pair);
-		produce(topic);
+	public void output(Message msg, String topic) throws IOException{
+		byte[] key = Key.seriailize(msg.key());
+		byte[] value = Value.seriailize(msg.value());
+
+		outputQueue.add(new ProducerRecord<byte[], byte[]>(topic, key, value));
+		if(outputQueue.size() >= outputBatchSize){
+			produce();
+		}
 	}
-	
-	private void produce(String topic) throws IOException{
+
+	private void produce() throws IOException{
 		while(!outputQueue.isEmpty()){
-			Message msg = outputQueue.poll();
-			byte[] key = Key.seriailize(msg.key());
-			byte[] value = Value.seriailize(msg.value());
-			producer.send(new ProducerRecord<byte[], byte[]>(topic, key, value), new Callback() {
+			ProducerRecord<byte[], byte[]> record = outputQueue.poll();
+			System.out.println("sent");
+			producer.send(record, new Callback() {
 				public void onCompletion(RecordMetadata arg0, Exception arg1) {
 					checkForAck();
 				}
@@ -177,16 +180,17 @@ public class PipeLine {
 
 	protected void checkForAck() {
 		outputBatchCounter++;
-
+		System.out.println("ack");
 		if(outputQueue.isEmpty() && outputBatchCounter != outputBatchSize){
-			System.out.println("Handle an error");
+			//throw new Exception();
+			System.out.println("Error");
 		}
 		outputBatchCounter = 0;
 	}
 
 	/**
 	 * Add a hook to the pipeline
-	 * @param hook - the code to execute a part of the hook
+	 * @param hook - the code to execute as part of the hook
 	 */
 	public void addStep(StepHook hook){
 		steps.put(hook.id(), hook);
@@ -203,19 +207,15 @@ public class PipeLine {
 				steps.get(i).execute(this);
 			}
 		}
-		produce("output");
-		consumer.commitSync(lastOffsets);
-		
-		consumer.close();
-		producer.close();
+		close();
 	}
 
-	/** 
-	 * Tempoary method to see the output from the pipeline
-	 * @return
-	 */
-	public Queue<Message> getOutput(){
-		return outputQueue;
+	public void close() throws IOException{
+		outputBatchSize = outputQueue.size();
+		produce();
+		consumer.commitSync(lastOffsets);
+		consumer.close();
+		producer.close();
 	}
 
 	/**
@@ -229,7 +229,6 @@ public class PipeLine {
 		if(checkForMsgs()){
 			ConsumerRecords<byte[], byte[]> msgs = consumer.poll(1000L);
 			for(ConsumerRecord<byte[], byte[]> record : msgs){
-				System.out.println("Adding msg");
 				topicInputQueues.get(record.topic()).add(record);
 			}
 		}
