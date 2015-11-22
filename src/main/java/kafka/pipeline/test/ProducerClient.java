@@ -26,7 +26,7 @@ public class ProducerClient {
 		props.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.ByteArraySerializer");
 		props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.ByteArraySerializer");
 
-	
+
 		KafkaProducer<byte[], byte[]> producer = new KafkaProducer<byte[], byte[]>(props);
 
 		for(int i = 30; i < 40; i++){
@@ -46,7 +46,7 @@ public class ProducerClient {
 
 			producer.send(new ProducerRecord<byte[], byte[]>("websitevisits", key, value), new Callback() {
 				public void onCompletion(RecordMetadata arg0, Exception arg1) {
-
+					System.out.println("ack");
 				}
 			});
 		}
